@@ -1,0 +1,28 @@
+                                Component                 Purpose                                                     Qty       
+                                
+                            1    Raspberry Pi 4 (2GB+)     Main brain — face recog, voice AI, logic                     1
+
+                            2    Arduino Mega 2560         Motor control + sensor I/O                                   1 
+                               
+                            3    ESP32-CAM module          Built-in camera for face detection                           1
+
+                            4    APDS-9960 gesture sensor  Hand gesture (swipe up/down/left/right)                      1
+
+                            5    USB microphone            Voice input                                                  1
+
+                            6    Mini speaker (3W) 
+                                + PAM8403 amp             Voice output / TTS                                            1
+
+                            7   L298N dual motor          driverDrive 4 DC motors                                       2
+         
+                            8    DC gear motors (6V) 
+                                with wheels               4-wheel drive chassis                                         4
+                      
+                            9    Robot chassis (4-wheel)   Frame                                                        1
+                         
+                           10    7.4V LiPo battery         Power for motors                                             1  
+
+                           11     5V 3A USB-C 
+                                power bank                Power for Pi                                                  1
+                      
+                           12    Jumper wires, breadboard  Connections

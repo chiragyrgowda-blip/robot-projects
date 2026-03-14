@@ -1,0 +1,351 @@
+robo brain
+
+
+  #!/usr/bin/env python3
+"""
+============================================================
+Robot Brain - Raspberry Pi
+Handles:
+  1. Face recognition (via OpenCV + face_recognition library)
+  2. Voice commands (speech recognition via SpeechRecognition)
+  3. Text-to-speech responses (pyttsx3)
+  4. Gesture reading (from APDS-9960 via smbus/I2C)
+  5. Sends motor commands to Arduino via USB Serial
+============================================================
+
+Install dependencies:
+  pip install opencv-python face_recognition SpeechRecognition pyttsx3 pyserial smbus2
+  sudo apt install python3-pyaudio portaudio19-dev espeak
+"""
+
+import cv2
+import face_recognition
+import serial
+import speech_recognition as sr
+import pyttsx3
+import time
+import threading
+import smbus2
+import numpy as np
+from pathlib import Path
+
+# ============================================================
+# Configuration
+# ============================================================
+ARDUINO_PORT   = "/dev/ttyUSB0"   # Change if needed (check: ls /dev/tty*)
+ARDUINO_BAUD   = 9600
+KNOWN_FACES_DIR = "./known_faces"   # Folder with photos named "PersonName.jpg"
+GESTURE_ADDR   = 0x39              # APDS-9960 I2C address
+
+# ============================================================
+# Global State
+# ============================================================
+arduino = None
+tts_engine = pyttsx3.init()
+recognizer = sr.Recognizer()
+microphone  = sr.Microphone()
+known_face_encodings = []
+known_face_names     = []
+face_lock = threading.Lock()
+latest_gesture = None
+last_command_time = 0
+
+# ============================================================
+# Setup
+# ============================================================
+def setup_tts():
+    tts_engine.setProperty('rate', 160)
+    tts_engine.setProperty('volume', 0.9)
+
+def speak(text):
+    print(f"[ROBOT SAYS]: {text}")
+    tts_engine.say(text)
+    tts_engine.runAndWait()
+
+def connect_arduino():
+    global arduino
+    try:
+        arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
+        time.sleep(2)  # Wait for Arduino to reset
+        response = arduino.readline().decode().strip()
+        print(f"[ARDUINO]: {response}")
+        speak("Motor system connected.")
+    except Exception as e:
+        print(f"[ERROR] Arduino connection failed: {e}")
+        speak("Warning: Motor system not connected.")
+
+def send_motor_command(cmd):
+    global last_command_time
+    if arduino and arduino.is_open:
+        arduino.write((cmd + '\n').encode())
+        last_command_time = time.time()
+        print(f"[MOTOR CMD]: {cmd}")
+    else:
+        print(f"[MOTOR OFFLINE] Command: {cmd}")
+
+# ============================================================
+# Load Known Faces
+# ============================================================
+def load_known_faces():
+    faces_path = Path(KNOWN_FACES_DIR)
+    if not faces_path.exists():
+        faces_path.mkdir()
+        print(f"[INFO] Created {KNOWN_FACES_DIR}/ — add face photos here (e.g. Alice.jpg)")
+        return
+
+    for img_path in faces_path.glob("*.jpg"):
+        name = img_path.stem
+        image = face_recognition.load_image_file(str(img_path))
+        encodings = face_recognition.face_encodings(image)
+        if encodings:
+            known_face_encodings.append(encodings[0])
+            known_face_names.append(name)
+            print(f"[FACE LOADED]: {name}")
+
+# ============================================================
+# Face Recognition Thread
+# ============================================================
+def face_recognition_thread():
+    cap = cv2.VideoCapture(0)   # 0 = built-in / ESP32-CAM stream URL
+    # For ESP32-CAM: cap = cv2.VideoCapture("http://192.168.1.X:81/stream")
+
+    greeted_names = set()
+    print("[CAMERA] Face recognition started.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.1)
+            continue
+
+        # Resize for faster processing
+        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        rgb_small   = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+
+        face_locations = face_recognition.face_locations(rgb_small)
+        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+
+        for face_encoding in face_encodings:
+            matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+            name = "Unknown"
+
+            if True in matches:
+                face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                best_match_idx = np.argmin(face_distances)
+                if matches[best_match_idx]:
+                    name = known_face_names[best_match_idx]
+
+            if name != "Unknown" and name not in greeted_names:
+                greeted_names.add(name)
+                threading.Thread(target=speak, args=(f"Hello {name}, welcome back!",), daemon=True).start()
+            elif name == "Unknown":
+                pass  # Optionally: speak("I see someone I don't know.")
+
+        # Show camera feed (optional — disable on headless Pi)
+        for (top, right, bottom, left), enc in zip(face_locations, face_encodings):
+            top *= 4; right *= 4; bottom *= 4; left *= 4
+            matches = face_recognition.compare_faces(known_face_encodings, enc)
+            name = "Unknown"
+            if True in matches:
+                idx = np.argmin(face_recognition.face_distance(known_face_encodings, enc))
+                if matches[idx]: name = known_face_names[idx]
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+        cv2.imshow("Robot Vision", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# ============================================================
+# Voice Command Processing
+# ============================================================
+VOICE_COMMANDS = {
+    # Movement
+    "forward":    "F",
+    "go forward": "F",
+    "move forward": "F",
+    "backward":   "B",
+    "go back":    "B",
+    "reverse":    "B",
+    "left":       "L",
+    "turn left":  "L",
+    "right":      "R",
+    "turn right": "R",
+    "stop":       "S",
+    "halt":       "S",
+    "freeze":     "S",
+    # Speed
+    "fast":       "SPEED:230",
+    "slow":       "SPEED:100",
+    "medium speed": "SPEED:170",
+}
+
+CONVERSATION_RESPONSES = {
+    "hello":      "Hello! I am your robot assistant. How can I help you?",
+    "hi":         "Hi there! Ready to assist.",
+    "how are you": "I am functioning perfectly. All systems are online.",
+    "what can you do": "I can move in any direction, recognize your face, and respond to your voice and hand gestures.",
+    "your name":  "My name is RoboBot. Nice to meet you!",
+    "thank you":  "You are welcome! Happy to help.",
+    "goodbye":    "Goodbye! See you soon.",
+    "bye":        "Bye! Shutting down voice mode.",
+}
+
+def process_voice_command(text):
+    text_lower = text.lower()
+    print(f"[VOICE HEARD]: {text_lower}")
+
+    # Check movement/motor commands
+    for phrase, cmd in VOICE_COMMANDS.items():
+        if phrase in text_lower:
+            speak(f"Executing {phrase}.")
+            send_motor_command(cmd)
+            if cmd not in ("S", "SPEED:230", "SPEED:100", "SPEED:170"):
+                time.sleep(1.5)
+                send_motor_command("S")  # Auto-stop after 1.5s
+            return
+
+    # Check conversation
+    for phrase, response in CONVERSATION_RESPONSES.items():
+        if phrase in text_lower:
+            speak(response)
+            return
+
+    # Fallback
+    speak(f"I heard: {text}. I am not sure what to do with that.")
+
+def voice_command_thread():
+    print("[MIC] Voice recognition started. Listening...")
+    with microphone as source:
+        recognizer.adjust_for_ambient_noise(source, duration=2)
+
+    while True:
+        try:
+            with microphone as source:
+                print("[LISTENING]...")
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=6)
+
+            text = recognizer.recognize_google(audio)
+            process_voice_command(text)
+
+        except sr.WaitTimeoutError:
+            pass  # No speech detected, keep listening
+        except sr.UnknownValueError:
+            pass  # Speech unclear
+        except sr.RequestError as e:
+            print(f"[SR ERROR]: {e}")
+        except Exception as e:
+            print(f"[VOICE THREAD ERROR]: {e}")
+
+# ============================================================
+# Gesture Control (APDS-9960 via I2C)
+# ============================================================
+APDS9960_ENABLE    = 0x80
+APDS9960_GCONF4    = 0xAB
+APDS9960_GFLVL     = 0xAE
+APDS9960_GSTATUS   = 0xAF
+APDS9960_GFIFO_U   = 0xFC
+
+GESTURE_MAP = {
+    "UP":    "F",
+    "DOWN":  "B",
+    "LEFT":  "L",
+    "RIGHT": "R",
+}
+
+def read_gesture_apds9960():
+    """
+    Simplified APDS-9960 gesture read.
+    For production use the full apds9960 Python library:
+      pip install apds9960
+    """
+    try:
+        bus = smbus2.SMBus(1)
+        bus.write_byte_data(GESTURE_ADDR, APDS9960_ENABLE, 0x4D)  # Enable gesture
+        time.sleep(0.1)
+        while True:
+            status = bus.read_byte_data(GESTURE_ADDR, APDS9960_GSTATUS)
+            if status & 0x01:  # GVALID bit
+                fifo_level = bus.read_byte_data(GESTURE_ADDR, APDS9960_GFLVL)
+                if fifo_level > 0:
+                    data = bus.read_i2c_block_data(GESTURE_ADDR, APDS9960_GFIFO_U, fifo_level * 4)
+                    # Basic gesture decode: compare U/D/L/R photodiode values
+                    u_sum = sum(data[i]   for i in range(0, len(data), 4))
+                    d_sum = sum(data[i+1] for i in range(0, len(data), 4))
+                    l_sum = sum(data[i+2] for i in range(0, len(data), 4))
+                    r_sum = sum(data[i+3] for i in range(0, len(data), 4))
+                    ud_diff = u_sum - d_sum
+                    lr_diff = l_sum - r_sum
+                    if abs(ud_diff) > abs(lr_diff):
+                        gesture = "UP" if ud_diff > 0 else "DOWN"
+                    else:
+                        gesture = "LEFT" if lr_diff > 0 else "RIGHT"
+                    return gesture
+            time.sleep(0.05)
+    except Exception as e:
+        print(f"[GESTURE ERROR]: {e}")
+        return None
+
+def gesture_control_thread():
+    print("[GESTURE] Hand gesture control started.")
+    last_gesture = None
+    last_gesture_time = 0
+
+    while True:
+        gesture = read_gesture_apds9960()
+        now = time.time()
+        if gesture and gesture != last_gesture and (now - last_gesture_time) > 1.0:
+            cmd = GESTURE_MAP.get(gesture, "S")
+            print(f"[GESTURE]: {gesture} → {cmd}")
+            speak(f"Gesture: {gesture.lower()}")
+            send_motor_command(cmd)
+            time.sleep(1.2)
+            send_motor_command("S")
+            last_gesture = gesture
+            last_gesture_time = now
+        time.sleep(0.1)
+
+# ============================================================
+# Main
+# ============================================================
+def main():
+    print("=" * 50)
+    print("  RoboBot Starting Up...")
+    print("=" * 50)
+
+    setup_tts()
+    speak("Robot initializing. Please wait.")
+
+    load_known_faces()
+    connect_arduino()
+
+    speak("All systems online. I am ready.")
+
+    # Start all subsystems as daemon threads
+    threads = [
+        threading.Thread(target=face_recognition_thread, daemon=True, name="FaceRecog"),
+        threading.Thread(target=voice_command_thread,    daemon=True, name="VoiceCmd"),
+        threading.Thread(target=gesture_control_thread,  daemon=True, name="Gesture"),
+    ]
+
+    for t in threads:
+        t.start()
+        print(f"[THREAD STARTED]: {t.name}")
+
+    print("\n[ROBOT ONLINE] Press Ctrl+C to shut down.\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        speak("Shutting down. Goodbye!")
+        send_motor_command("S")
+        if arduino:
+            arduino.close()
+        print("[SHUTDOWN] Robot stopped.")
+
+if __name__ == "__main__":
+    main()

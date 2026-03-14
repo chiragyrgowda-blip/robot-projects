@@ -1,0 +1,114 @@
+// ============================================================
+// Arduino Mega - Motor Control + Serial Command Receiver
+// Receives commands from Raspberry Pi over USB Serial
+// Commands: F=forward, B=backward, L=left, R=right, S=stop
+//           FL=forward-left, FR=forward-right (gesture curves)
+// ============================================================
+
+// --- Motor A (Left Front + Left Rear share same pins) ---
+#define ENA 5   // PWM speed for left motors
+#define IN1 22  // Left forward
+#define IN2 23  // Left backward
+
+// --- Motor B (Right Front + Right Rear) ---
+#define ENB 6   // PWM speed for right motors
+#define IN3 24  // Right forward
+#define IN4 25  // Right backward
+
+int motorSpeed = 180; // 0-255 PWM value (default ~70% speed)
+
+void setup() {
+  Serial.begin(9600); // Communication with Raspberry Pi
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  stopMotors();
+  Serial.println("ROBOT_READY");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    processCommand(cmd);
+  }
+}
+
+void processCommand(String cmd) {
+  Serial.print("CMD:");
+  Serial.println(cmd);
+
+  if (cmd == "F")  moveForward();
+  else if (cmd == "B")  moveBackward();
+  else if (cmd == "L")  turnLeft();
+  else if (cmd == "R")  turnRight();
+  else if (cmd == "S")  stopMotors();
+  else if (cmd == "FL") curveForwardLeft();
+  else if (cmd == "FR") curveForwardRight();
+  else if (cmd.startsWith("SPEED:")) {
+    motorSpeed = cmd.substring(6).toInt();
+    motorSpeed = constrain(motorSpeed, 0, 255);
+    Serial.print("Speed set to: ");
+    Serial.println(motorSpeed);
+  }
+}
+
+// ---- Movement Functions ----
+
+void moveForward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void moveBackward() {
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void turnLeft() {
+  // Spin left: right motors forward, left motors backward
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void turnRight() {
+  // Spin right: left motors forward, right motors backward
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+}
+
+void curveForwardLeft() {
+  // Slow left side, full right side
+  analogWrite(ENA, motorSpeed / 2);
+  analogWrite(ENB, motorSpeed);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void curveForwardRight() {
+  // Full left side, slow right side
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed / 2);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void stopMotors() {
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
